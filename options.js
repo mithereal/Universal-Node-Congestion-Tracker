@@ -1,44 +1,456 @@
+// options.js
 import { ModemRegistry } from './modems/registry.js';
 
-let groupedLogs = {};
-let activeDateKey = null;
-let activePointData = []; // Stores chart coordinates for tooltip collisions
+let hardwareTelemetryLog = [];
+let activeTabFilter = 'all';
+
+// Graphic Vector & Coordinate States
+let plottedCoordinatesCache = [];
+let hoverStateNode = null;
+let plottedPieSlicesCache = [];
+let hoveredPieSlice = null;
+
+const DEFAULT_SETTINGS = {
+  extensionEnabled: true,
+  pollingInterval: 5,
+  modemProfile: 'auto'
+};
+
+const UI = {
+  pollingIntervalSelect: document.getElementById('pollingIntervalSelect'),
+  modemProfileSelect: document.getElementById('modemProfileSelect'),
+  statMinSNR: document.getElementById('statMinSNR'),
+  statErrors: document.getElementById('statErrors'),
+  statSamples: document.getElementById('statSamples'),
+  tabsContainer: document.getElementById('tabsContainer'),
+  optionsChart: document.getElementById('optionsChart'),
+  pieChart: document.getElementById('pieChart'),
+  pieMetricSelect: document.getElementById('pieMetricSelect'),
+  chartTooltip: document.getElementById('chartTooltip'),
+  pieTooltip: document.getElementById('pieTooltip'),
+  csvFileInput: document.getElementById('csvFileInput'),
+  csvExportBtn: document.getElementById('csvExportBtn')
+};
 
 document.addEventListener('DOMContentLoaded', () => {
-  // 1. Storage Processing & Initial Layout Render
-  loadAndRenderData();
+  populateModemDropdown();
+  loadStoredSettings();
+  loadTelemetryData();
+  setupEventListeners();
+  buildTabSelectors();
+  listenForStorageChanges();
+  setupThemeAutodetectListener();
+});
 
-  // Listen for real-time browser theme changes
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-    // Force canvas systems to repaint using updated color boundaries
-    loadAndRenderData();
+function setupThemeAutodetectListener() {
+  const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+  try {
+    darkQuery.addEventListener('change', () => renderDataVisualizations());
+  } catch (e) {
+    darkQuery.addListener(() => renderDataVisualizations());
+  }
+}
+
+function getActiveThemePalette() {
+  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return {
+    text: isDark ? "#94a3b8" : "#64748b",
+    grid: isDark ? "#334155" : "#e2e8f0",
+    primary: isDark ? "#3b82f6" : "#2563eb",
+    pointStroke: isDark ? "#1e293b" : "#ffffff"
+  };
+}
+
+function populateModemDropdown() {
+  if (!UI.modemProfileSelect) return;
+  UI.modemProfileSelect.innerHTML = '<option value="auto">Auto-Detect Brand</option>';
+  ModemRegistry.forEach(modem => {
+    const option = document.createElement('option');
+    option.value = modem.id;
+    option.innerText = modem.name;
+    UI.modemProfileSelect.appendChild(option);
   });
+}
 
-  // 2. Build out plug-and-play selection choices from dynamic registry
-  buildDynamicModemDropdown();
+function listenForStorageChanges() {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === 'local' && changes.hardwareMetricsLog) {
+      hardwareTelemetryLog = changes.hardwareMetricsLog.newValue || [];
+      updateMetricsDashboard();
+      renderDataVisualizations();
+    }
+  });
+}
 
-  // 2b. Sync Polling Interval Menu Pipeline
-  setupIntervalDropdown();
+function loadStoredSettings() {
+  chrome.storage.local.get(DEFAULT_SETTINGS, (settings) => {
+    if (UI.pollingIntervalSelect) UI.pollingIntervalSelect.value = settings.pollingInterval;
+    if (UI.modemProfileSelect) UI.modemProfileSelect.value = settings.modemProfile;
+  });
+}
 
-  // 3. Register CSV upload listeners
-  const fileInput = document.getElementById('csvFileInput');
-  if (fileInput) fileInput.addEventListener('change', handleCSVImport);
+function saveSetting(key, value) {
+  chrome.storage.local.set({ [key]: value });
+}
 
-  // 4. Register CSV export listener
-  const exportBtn = document.getElementById('csvExportBtn');
-  if (exportBtn) exportBtn.addEventListener('click', handleCSVExport);
+function loadTelemetryData() {
+  chrome.storage.local.get({ hardwareMetricsLog: [] }, (result) => {
+    hardwareTelemetryLog = result.hardwareMetricsLog;
+    updateMetricsDashboard();
+    renderDataVisualizations();
+  });
+}
 
-  // 5. Hover Tooltip Intersect Observers
-  const mainCanvas = document.getElementById('optionsChart');
-  if (mainCanvas) {
-    mainCanvas.addEventListener('mousemove', handleChartHover);
-    mainCanvas.addEventListener('mouseleave', () => {
-      const tooltip = document.getElementById('chartTooltip');
-      if (tooltip) tooltip.style.display = 'none';
-    });
+/**
+ * Updates the dashboard metrics.
+ * If a filtered dataset is provided, it calculates metrics based on that view.
+ * @param {Array|null} dataset - The filtered telemetry data (optional).
+ */
+function updateMetricsDashboard(dataset = null) {
+  // Use the filtered dataset if provided, else fall back to full history
+  const data = dataset || hardwareTelemetryLog;
+  const sampleCount = data.length;
+
+  UI.statSamples.innerText = sampleCount;
+
+  // Handle empty state
+  if (sampleCount === 0) {
+    const snrDisplay = document.getElementById('statSNRDisplay');
+    if (snrDisplay) snrDisplay.innerText = "-- / -- dB";
+    UI.statErrors.innerText = "0";
+    return;
   }
 
-  // 6. Donation Overlay Windows Controller
+  // 1. Get the Current SNR (latest entry in the current view)
+  const currentLog = data[data.length - 1];
+  const currentSNR = currentLog.avgSNR ? currentLog.avgSNR.toFixed(1) : "--";
+
+  // 2. Calculate the Historical Lowest SNR within the current view
+  const allRecordedMinSNRs = data
+    .map(log => parseFloat(log.minSNR))
+    .filter(val => !isNaN(val) && val > 0);
+
+  const absoluteWorstSNR = allRecordedMinSNRs.length > 0 ? Math.min(...allRecordedMinSNRs) : null;
+  const histText = absoluteWorstSNR ? absoluteWorstSNR.toFixed(1) : "--";
+
+  // 3. Update the SNR UI (Historical / Current format)
+  const snrDisplay = document.getElementById('statSNRDisplay');
+  if (snrDisplay) {
+    snrDisplay.innerText = `${histText} / ${currentSNR} dB`;
+    // Visual alert if current SNR is in the "danger zone" (< 30dB)
+    snrDisplay.style.color = (currentLog.avgSNR < 30) ? "#dc2626" : "var(--text-title)";
+  }
+
+  // 4. Update Cumulative Errors based on the filtered view
+  const filteredErrorsSum = data.reduce((accum, log) => accum + (log.totalUncorrectables || 0), 0);
+  UI.statErrors.innerText = filteredErrorsSum.toLocaleString();
+}
+
+function setupEventListeners() {
+  if (UI.pollingIntervalSelect) UI.pollingIntervalSelect.addEventListener('change', (e) => saveSetting('pollingInterval', parseInt(e.target.value, 10)));
+  if (UI.modemProfileSelect) UI.modemProfileSelect.addEventListener('change', (e) => saveSetting('modemProfile', e.target.value));
+  if (UI.pieMetricSelect) UI.pieMetricSelect.addEventListener('change', () => renderDataVisualizations());
+  UI.csvExportBtn.addEventListener('click', exportTelemetryToCSV);
+  UI.csvFileInput.addEventListener('change', importTelemetryFromCSV);
+  if (UI.optionsChart) {
+    UI.optionsChart.addEventListener('mousemove', handleChartMouseMove);
+    UI.optionsChart.addEventListener('mouseleave', () => {
+      hoverStateNode = null;
+      if (UI.chartTooltip) UI.chartTooltip.style.display = 'none';
+      renderTimelinePerformanceChart(getFilteredTelemetry());
+    });
+  }
+  if (UI.pieChart) {
+    UI.pieChart.addEventListener('mousemove', handlePieMouseMove);
+    UI.pieChart.addEventListener('mouseleave', () => {
+      hoveredPieSlice = null;
+      if (UI.pieTooltip) UI.pieTooltip.style.display = 'none';
+      renderBoundaryDistributionPieChart(getFilteredTelemetry());
+    });
+  }
+}
+
+function exportTelemetryToCSV() {
+  if (hardwareTelemetryLog.length === 0) return;
+  const headers = ["Timestamp", "ISODate", "ChannelsScanned", "MinSNR", "AvgSNR", "TotalCorrectables", "TotalUncorrectables"];
+  const rows = hardwareTelemetryLog.map(log => [log.capturedAt, new Date(log.capturedAt).toISOString(), log.channelsScanned || 0, log.minSNR || 0, log.avgSNR || 0, log.totalCorrectables || 0, log.totalUncorrectables || 0]);
+  const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+  const downloadAnchor = document.createElement("a");
+  downloadAnchor.setAttribute("href", encodeURI(csvContent));
+  downloadAnchor.setAttribute("download", `node_congestion_metrics_${Date.now()}.csv`);
+  document.body.appendChild(downloadAnchor);
+  downloadAnchor.click();
+  document.body.removeChild(downloadAnchor);
+}
+
+function importTelemetryFromCSV(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const fileReader = new FileReader();
+  fileReader.onload = function(e) {
+    const lines = e.target.result.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const importedArrayLog = [];
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].split(",");
+      if (parts.length >= 7) {
+        importedArrayLog.push({ capturedAt: parseInt(parts[0], 10), channelsScanned: parseInt(parts[2], 10) || 0, minSNR: parseFloat(parts[3]) || 0, avgSNR: parseFloat(parts[4]) || 0, totalCorrectables: parseInt(parts[5], 10) || 0, totalUncorrectables: parseInt(parts[6], 10) || 0 });
+      }
+    }
+    if (importedArrayLog.length > 0 && confirm(`Import ${importedArrayLog.length} logs?`)) {
+      chrome.storage.local.set({ hardwareMetricsLog: importedArrayLog }, () => {
+        hardwareTelemetryLog = importedArrayLog;
+        updateMetricsDashboard();
+        renderDataVisualizations();
+      });
+    }
+  };
+  fileReader.readAsText(file);
+}
+
+function buildTabSelectors() {
+  const intervals = [{ label: 'All Samples', filter: 'all' }, { label: 'Past 1H', filter: '1h' }, { label: 'Past 24H', filter: '24h' }];
+  UI.tabsContainer.innerHTML = '';
+  intervals.forEach((tab, index) => {
+    const btn = document.createElement('button');
+    btn.className = `tab-btn ${index === 0 ? 'active' : ''}`;
+    btn.innerText = tab.label;
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeTabFilter = tab.filter;
+      renderDataVisualizations();
+    });
+    UI.tabsContainer.appendChild(btn);
+  });
+}
+
+function getFilteredTelemetry() {
+  const now = Date.now();
+  // Calculate global average uncorrectables across the entire history
+  const totalErrors = hardwareTelemetryLog.reduce((sum, log) => sum + (log.totalUncorrectables || 0), 0);
+  const avgErrors = hardwareTelemetryLog.length > 0 ? (totalErrors / hardwareTelemetryLog.length) : 0;
+
+  return hardwareTelemetryLog.filter(log => {
+    // Apply time filters
+    const timeFilter = activeTabFilter === '1h' ? (now - log.capturedAt) <= 3600000 : true;
+
+    // Apply "Above Average" error filter
+    const errorFilter = activeTabFilter === 'errors'
+      ? (log.totalUncorrectables > avgErrors && log.totalUncorrectables > 0)
+      : true;
+
+    return timeFilter && errorFilter;
+  });
+}
+
+function renderDataVisualizations() {
+  const totalErrors = hardwareTelemetryLog.reduce((sum, log) => sum + (log.totalUncorrectables || 0), 0);
+  const avgErrors = hardwareTelemetryLog.length > 0 ? (totalErrors / hardwareTelemetryLog.length) : 0;
+  const thresholdLabel = document.getElementById('errorThresholdLabel');
+
+  if (thresholdLabel) {
+    thresholdLabel.innerText = `Threshold: > ${avgErrors.toFixed(1)} errors`;
+  }
+  const data = getFilteredTelemetry();
+  renderTimelinePerformanceChart(data);
+  renderBoundaryDistributionPieChart(data);
+}
+
+function renderTimelinePerformanceChart(dataset) {
+  const canvasCtx = UI.optionsChart.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const computedWidth = UI.optionsChart.parentElement.clientWidth;
+  const palette = getActiveThemePalette();
+  UI.optionsChart.width = computedWidth * dpr;
+  UI.optionsChart.height = 220 * dpr;
+  UI.optionsChart.style.width = `${computedWidth}px`;
+  UI.optionsChart.style.height = `220px`;
+  canvasCtx.scale(dpr, dpr);
+  canvasCtx.clearRect(0, 0, computedWidth, 220);
+  plottedCoordinatesCache = [];
+  if (dataset.length === 0) {
+    canvasCtx.fillStyle = palette.text;
+    canvasCtx.font = "13px sans-serif";
+    canvasCtx.textAlign = "center";
+    canvasCtx.fillText("No matching telemetry trend snapshots found.", computedWidth / 2, 110);
+    return;
+  }
+  const padding = { top: 20, right: 20, bottom: 30, left: 45 };
+  const graphW = computedWidth - padding.left - padding.right;
+  const graphH = 220 - padding.top - padding.bottom;
+  const activeSnrArr = dataset.map(d => d.avgSNR);
+  const maxSNR = Math.max(...activeSnrArr, 45);
+  const minSNR = Math.max(0, Math.min(...activeSnrArr, 25) - 2);
+  canvasCtx.strokeStyle = palette.grid;
+  canvasCtx.fillStyle = palette.text;
+  canvasCtx.font = "10px sans-serif";
+  canvasCtx.textAlign = "right";
+  for (let i = 0; i <= 4; i++) {
+    const ratio = i / 4;
+    const y = padding.top + graphH * (1 - ratio);
+    const val = minSNR + ratio * (maxSNR - minSNR);
+    canvasCtx.beginPath();
+    canvasCtx.moveTo(padding.left, y);
+    canvasCtx.lineTo(computedWidth - padding.right, y);
+    canvasCtx.stroke();
+    canvasCtx.fillText(`${val.toFixed(0)}dB`, padding.left - 8, y + 3);
+  }
+  dataset.forEach((log, idx) => {
+    const x = padding.left + (idx / (dataset.length - 1 || 1)) * graphW;
+    const normY = (log.avgSNR - minSNR) / (maxSNR - minSNR);
+    const y = padding.top + graphH * (1 - normY);
+    plottedCoordinatesCache.push({ x, y, data: log });
+  });
+  canvasCtx.beginPath();
+  canvasCtx.lineWidth = 2.5;
+  canvasCtx.strokeStyle = palette.primary;
+  plottedCoordinatesCache.forEach((pt, idx) => {
+    if (idx === 0) canvasCtx.moveTo(pt.x, pt.y);
+    else canvasCtx.lineTo(pt.x, pt.y);
+  });
+  canvasCtx.stroke();
+  plottedCoordinatesCache.forEach((pt) => {
+    const isHovered = (hoverStateNode && hoverStateNode.x === pt.x && hoverStateNode.y === pt.y);
+    canvasCtx.beginPath();
+    canvasCtx.arc(pt.x, pt.y, isHovered ? 6 : 3.5, 0, Math.PI * 2);
+    canvasCtx.fillStyle = isHovered ? "#ef4444" : palette.primary;
+    canvasCtx.strokeStyle = palette.pointStroke;
+    canvasCtx.lineWidth = 1.5;
+    canvasCtx.fill();
+    canvasCtx.stroke();
+  });
+}
+
+function handleChartMouseMove(e) {
+  const boundingRectangle = UI.optionsChart.getBoundingClientRect();
+  const mouseX = e.clientX - boundingRectangle.left;
+  const mouseY = e.clientY - boundingRectangle.top;
+  let closestNode = null;
+  let minimumProximityDistance = 15;
+  plottedCoordinatesCache.forEach(pt => {
+    const distance = Math.sqrt((mouseX - pt.x) ** 2 + (mouseY - pt.y) ** 2);
+    if (distance < minimumProximityDistance) {
+      minimumProximityDistance = distance;
+      closestNode = pt;
+    }
+  });
+  if (closestNode) {
+    if (!hoverStateNode || hoverStateNode.x !== closestNode.x) {
+      hoverStateNode = closestNode;
+      renderTimelinePerformanceChart(getFilteredTelemetry());
+    }
+    const log = closestNode.data;
+    const timeStr = new Date(log.capturedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    UI.chartTooltip.innerHTML = `<div style="font-weight:bold; margin-bottom:4px; color:#ffffff;">${timeStr}</div><div><b>Avg SNR:</b> ${log.avgSNR.toFixed(2)} dB</div><div><b>Min SNR:</b> ${log.minSNR.toFixed(1)} dB</div><div><b>Correctables:</b> ${log.totalCorrectables.toLocaleString()}</div><div style="color:${log.totalUncorrectables > 0 ? '#ef4444' : 'inherit'}"><b>Uncorrectables:</b> ${log.totalUncorrectables.toLocaleString()}</div>`;
+    UI.chartTooltip.style.display = 'block';
+    UI.chartTooltip.style.left = `${closestNode.x + 15}px`;
+    UI.chartTooltip.style.top = `${closestNode.y - 45}px`;
+  } else if (hoverStateNode) {
+    hoverStateNode = null;
+    UI.chartTooltip.style.display = 'none';
+    renderTimelinePerformanceChart(getFilteredTelemetry());
+  }
+}
+
+// --- DYNAMIC PIE CHART ENGINE FILTERED BY UNCORRECTABLES ---
+/**
+ * Renders the Pie Chart with dynamic color-coding based on global error averages.
+ * Red = Above Average (Significant), Green = Below/At Average (Baseline/Noise).
+ * @param {Array} dataset - The filtered telemetry data to visualize.
+ * @param {number} avgErrors - The calculated global average error count for thresholding.
+ */
+function renderBoundaryDistributionPieChart(dataset, avgErrors) {
+  const canvasCtx = UI.pieChart.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = UI.pieChart.parentElement.clientWidth || 250;
+  const palette = getActiveThemePalette();
+
+  UI.pieChart.width = w * dpr;
+  UI.pieChart.height = 180 * dpr;
+  UI.pieChart.style.width = `${w}px`;
+  UI.pieChart.style.height = `180px`;
+  canvasCtx.scale(dpr, dpr);
+  canvasCtx.clearRect(0, 0, w, 180);
+
+  plottedPieSlicesCache = [];
+
+  // Filter only samples that have uncorrectable errors
+  const validPieSamples = dataset.filter(log => (log.totalUncorrectables || 0) > 0);
+
+  if (validPieSamples.length === 0) {
+    canvasCtx.fillStyle = palette.text;
+    canvasCtx.font = "11px sans-serif";
+    canvasCtx.textAlign = "center";
+    canvasCtx.fillText("No uncorrectable errors logged.", w / 2, 90);
+    return;
+  }
+
+  const grandTotalUncorrectables = validPieSamples.reduce((acc, log) => acc + (log.totalUncorrectables || 0), 0);
+  let currentAngle = -Math.PI / 2;
+  const cX = w / 2, cY = 90, baseRadius = 60;
+
+  validPieSamples.forEach((log) => {
+    const sliceAngle = (log.totalUncorrectables / grandTotalUncorrectables) * (Math.PI * 2);
+    const startAngle = currentAngle;
+    const endAngle = currentAngle + sliceAngle;
+    const isHovered = hoveredPieSlice && hoveredPieSlice.capturedAt === log.capturedAt;
+
+    // Logic: Red if strictly greater than avgErrors (Significant Incident),
+    // Otherwise Green (Baseline Noise)
+    const isAboveAverage = log.totalUncorrectables > avgErrors;
+    const segmentColor = isAboveAverage ? "#dc2626" : "#22c55e";
+
+    canvasCtx.beginPath();
+    canvasCtx.moveTo(cX, cY);
+    canvasCtx.arc(cX, cY, isHovered ? baseRadius + 8 : baseRadius, startAngle, endAngle);
+    canvasCtx.closePath();
+    canvasCtx.fillStyle = segmentColor;
+    canvasCtx.fill();
+    canvasCtx.strokeStyle = palette.pointStroke;
+    canvasCtx.lineWidth = 1.5;
+    canvasCtx.stroke();
+
+    plottedPieSlicesCache.push({
+      capturedAt: log.capturedAt,
+      timeLabel: new Date(log.capturedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      uncorrectables: log.totalUncorrectables,
+      percentage: (log.totalUncorrectables / grandTotalUncorrectables) * 100,
+      startAngle, endAngle, segmentColor
+    });
+    currentAngle = endAngle;
+  });
+}
+function handlePieMouseMove(e) {
+  const boundingRectangle = UI.pieChart.getBoundingClientRect();
+  const mouseX = e.clientX - boundingRectangle.left;
+  const mouseY = e.clientY - boundingRectangle.top;
+  const cX = boundingRectangle.width / 2, cY = 90;
+  const deltaX = mouseX - cX, deltaY = mouseY - cY;
+  const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+  let mouseAngle = Math.atan2(deltaY, deltaX);
+  if (mouseAngle < -Math.PI / 2) mouseAngle += Math.PI * 2;
+  let matchNode = null;
+  if (distance <= 75 && distance > 5) {
+    plottedPieSlicesCache.forEach(slice => {
+      if (mouseAngle > slice.startAngle && mouseAngle <= slice.endAngle) matchNode = slice;
+    });
+  }
+  if (matchNode) {
+    if (!hoveredPieSlice || hoveredPieSlice.capturedAt !== matchNode.capturedAt) {
+      hoveredPieSlice = matchNode;
+      renderBoundaryDistributionPieChart(getFilteredTelemetry());
+    }
+    UI.pieTooltip.innerHTML = `<div style="font-weight:bold; color:#ffffff;">Snapshot ${matchNode.timeLabel}</div><div><b>Uncorrectables:</b> ${matchNode.uncorrectables.toLocaleString()}</div><div style="font-size:10px;">Share: ${matchNode.percentage.toFixed(1)}%</div>`;
+    UI.pieTooltip.style.display = 'block';
+    UI.pieTooltip.style.left = `${mouseX + 15}px`;
+    UI.pieTooltip.style.top = `${mouseY - 25}px`;
+  } else if (hoveredPieSlice) {
+    hoveredPieSlice = null;
+    UI.pieTooltip.style.display = 'none';
+    renderBoundaryDistributionPieChart(getFilteredTelemetry());
+  }
+}
+ // 6. Donation Overlay Windows Controller
   const donateModal = document.getElementById('donateModal');
   const openDonateBtn = document.getElementById('openDonateModalBtn');
   const closeDonateBtn = document.getElementById('closeDonateModalBtn');
@@ -81,382 +493,3 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
-
-  // 7. Listen for state updates coming from popup toggle switches
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message.type === 'TOGGLE_CHANGED') {
-      loadAndRenderData();
-    }
-  });
-});
-
-// --- TIMING INTERVAL DROPDOWN REGISTRY PIPELINE ---
-function setupIntervalDropdown() {
-  const intervalSelect = document.getElementById('pollingIntervalSelect');
-  if (!intervalSelect) return;
-
-  // Hydrate UI state selection from local storage
-  chrome.storage.local.get({ pollingIntervalMinutes: 5 }, (data) => {
-    intervalSelect.value = data.pollingIntervalMinutes.toString();
-  });
-
-  // Watch for adjustments to trigger interval changes across elements
-  intervalSelect.addEventListener('change', (e) => {
-    const minutes = parseInt(e.target.value, 10);
-
-    chrome.storage.local.set({ pollingIntervalMinutes: minutes }, () => {
-      // Re-initialize chrome.alarms schedule stack directly
-      chrome.alarms.clear('telemetry_poll_alarm', () => {
-        chrome.alarms.create('telemetry_poll_alarm', {
-          periodInMinutes: minutes,
-          delayInMinutes: minutes
-        });
-      });
-    });
-  });
-}
-
-// --- DYNAMIC REGISTRY INTERFACE LOOP ---
-function buildDynamicModemDropdown() {
-  const profileSelect = document.getElementById('modemProfileSelect');
-  if (!profileSelect) return;
-
-  // Flush hardcoded configurations except default fallback anchor
-  profileSelect.innerHTML = '<option value="auto">Auto-Detect Brand</option>';
-
-  // Append registered modem objects instantly on tab creation
-  ModemRegistry.forEach(modem => {
-    const opt = document.createElement('option');
-    opt.value = modem.id;
-    opt.innerText = modem.name;
-    profileSelect.appendChild(opt);
-  });
-
-  // Rehydrate previous state choices
-  chrome.storage.local.get({ preferredModemProfile: 'auto' }, (data) => {
-    profileSelect.value = data.preferredModemProfile;
-  });
-
-  profileSelect.addEventListener('change', (e) => {
-    chrome.storage.local.set({ preferredModemProfile: e.target.value });
-  });
-}
-
-function loadAndRenderData() {
-  chrome.storage.local.get({
-    networkLogs: [],
-    extensionEnabled: true
-  }, (storage) => {
-    // Process history unconditionally so logs remain browsable even when tracking is suspended
-    processDataArray(storage.networkLogs);
-  });
-}
-
-function processDataArray(rawLogs) {
-  groupedLogs = {};
-  if (!rawLogs || rawLogs.length === 0) {
-    renderEmptyState();
-    return;
-  }
-  rawLogs.forEach(entry => {
-    if (!entry.timestamp) return;
-    const dateKey = entry.timestamp.split('T')[0];
-    if (!groupedLogs[dateKey]) groupedLogs[dateKey] = [];
-    groupedLogs[dateKey].push(entry);
-  });
-  buildDateTabs();
-}
-
-function buildDateTabs() {
-  const tabsContainer = document.getElementById('tabsContainer');
-  if (!tabsContainer) return;
-  tabsContainer.innerHTML = '';
-  const dates = Object.keys(groupedLogs).sort();
-
-  if (dates.length === 0) return;
-  if (!activeDateKey || !groupedLogs[activeDateKey]) {
-    activeDateKey = dates[dates.length - 1];
-  }
-
-  dates.forEach(dateStr => {
-    const btn = document.createElement('button');
-    btn.className = `tab-btn ${dateStr === activeDateKey ? 'active' : ''}`;
-    const pieces = dateStr.split('-');
-    btn.innerText = pieces.length === 3 ? `${pieces[1]}/${pieces[2]}` : dateStr;
-    btn.addEventListener('click', () => {
-      activeDateKey = dateStr;
-      buildDateTabs();
-    });
-    tabsContainer.appendChild(btn);
-  });
-
-  drawDailyGraph(groupedLogs[activeDateKey]);
-  drawPieChart(groupedLogs[activeDateKey]);
-}
-
-function drawDailyGraph(dayLogs) {
-  const canvas = document.getElementById('optionsChart');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-
-  const isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
-
-  // Adjust visualization variables dynamically by theme profile
-  const mainGridColor  = isDarkMode ? '#334155' : '#e2e8f0';
-  const subGridColor   = isDarkMode ? '#1e293b' : '#f1f5f9';
-  const textLabelColor = isDarkMode ? '#94a3b8' : '#64748b';
-  const trendLineColor = isDarkMode ? '#38bdf8' : '#3b82f6';
-  const nodeDotColor   = isDarkMode ? '#0ea5e9' : '#1d4ed8';
-
-  canvas.width = 650;
-  canvas.height = 280;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  if (!dayLogs || dayLogs.length === 0) return;
-
-  const totalPoints = dayLogs.length;
-  const paddingLeft = 45;
-  const paddingRight = 20;
-  const paddingTop = 20;
-  const paddingBottom = 35;
-
-  const graphWidth = canvas.width - paddingLeft - paddingRight;
-  const graphHeight = canvas.height - paddingTop - paddingBottom;
-  const spacing = graphWidth / (totalPoints > 1 ? totalPoints - 1 : 1);
-
-  activePointData = [];
-
-  // Draw Y Axis Decibel Gridlines
-  ctx.strokeStyle = mainGridColor;
-  ctx.lineWidth = 1;
-  ctx.fillStyle = textLabelColor;
-  ctx.font = '10px sans-serif';
-
-  const snrLevels = [20, 25, 30, 35, 40, 45];
-  snrLevels.forEach(level => {
-    const y = paddingTop + graphHeight - ((level - 20) * (graphHeight / 25));
-    ctx.beginPath();
-    ctx.moveTo(paddingLeft, y);
-    ctx.lineTo(canvas.width - paddingRight, y);
-    ctx.stroke();
-    ctx.fillText(`${level} dB`, 5, y + 3);
-  });
-
-  // Calculate plotting tracks and draw X Time Grids
-  const maxTimeLabels = 5;
-  const step = Math.ceil(totalPoints / maxTimeLabels);
-
-  dayLogs.forEach((log, i) => {
-    const x = paddingLeft + (i * spacing);
-    const yLine = paddingTop + graphHeight - ((log.minSNR - 20) * (graphHeight / 25));
-    activePointData.push({ x: x, y: yLine, raw: log });
-
-    if (i % step === 0 || i === totalPoints - 1) {
-      ctx.strokeStyle = subGridColor;
-      ctx.beginPath();
-      ctx.moveTo(x, paddingTop);
-      ctx.lineTo(x, canvas.height - paddingBottom);
-      ctx.stroke();
-
-      ctx.fillStyle = textLabelColor;
-      const timeStr = new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      ctx.fillText(timeStr, x - 18, canvas.height - 12);
-    }
-  });
-
-  // Stroke Path Curve
-  ctx.strokeStyle = trendLineColor;
-  ctx.lineWidth = 3;
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  activePointData.forEach((pt, i) => {
-    if (i === 0) ctx.moveTo(pt.x, pt.y);
-    else ctx.lineTo(pt.x, pt.y);
-  });
-  ctx.stroke();
-
-  // Dots
-  activePointData.forEach(pt => {
-    ctx.fillStyle = nodeDotColor;
-    ctx.beginPath();
-    ctx.arc(pt.x, pt.y, 3.5, 0, 2 * Math.PI);
-    ctx.fill();
-  });
-
-  let minSNR = Math.min(...dayLogs.map(l => l.minSNR));
-  let totalErrors = dayLogs.reduce((acc, curr) => acc + (curr.uncorrectables || 0), 0);
-  document.getElementById('statMinSNR').innerText = `${minSNR.toFixed(1)} dB`;
-  document.getElementById('statErrors').innerText = totalErrors.toLocaleString();
-  document.getElementById('statSamples').innerText = totalPoints;
-}
-
-function handleChartHover(event) {
-  const canvas = document.getElementById('optionsChart');
-  const rect = canvas.getBoundingClientRect();
-  const tooltip = document.getElementById('chartTooltip');
-  if (!canvas || !tooltip || activePointData.length === 0) return;
-
-  const mouseX = (event.clientX - rect.left) * (canvas.width / rect.width);
-  let closestPoint = activePointData.reduce((prev, curr) => {
-    return (Math.abs(curr.x - mouseX) < Math.abs(prev.x - mouseX)) ? curr : prev;
-  });
-
-  if (Math.abs(closestPoint.x - mouseX) < 20) {
-    const time = new Date(closestPoint.raw.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    tooltip.style.display = 'block';
-    tooltip.innerHTML = `
-      <b>Time:</b> ${time}<br/>
-      <b>Worst SNR:</b> <span style="color:var(--tab-active, #3b82f6); font-weight:bold;">${closestPoint.raw.minSNR.toFixed(1)} dB</span><br/>
-      <b>Codewords:</b> ${closestPoint.raw.uncorrectables.toLocaleString()}
-    `;
-    tooltip.style.left = (closestPoint.x * (rect.width / canvas.width)) + 15 + 'px';
-    tooltip.style.top = (closestPoint.y * (rect.height / canvas.height)) - 15 + 'px';
-  } else {
-    tooltip.style.display = 'none';
-  }
-}
-
-function drawPieChart(dayLogs) {
-  const canvas = document.getElementById('pieChart');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-
-  const isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const textLabelColor = isDarkMode ? '#94a3b8' : '#334155';
-
-  canvas.width = 300;
-  canvas.height = 280;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  if (!dayLogs || dayLogs.length === 0) return;
-
-  let categories = [
-    { label: 'Pristine (>35dB)', count: 0, color: '#10b981' },
-    { label: 'Degraded (30-35dB)', count: 0, color: '#f59e0b' },
-    { label: 'Severe Noise (<30dB)', count: 0, color: '#ef4444' }
-  ];
-
-  dayLogs.forEach(log => {
-    if (log.minSNR > 35) categories[0].count++;
-    else if (log.minSNR >= 30) categories[1].count++;
-    else categories[2].count++;
-  });
-
-  const totalSamples = dayLogs.length;
-  let startAngle = 0;
-  const centerX = 150;
-  const centerY = 105;
-  const radius = 70;
-
-  categories.forEach(cat => {
-    if (cat.count === 0) return;
-    const sliceAngle = (cat.count / totalSamples) * (2 * Math.PI);
-    ctx.fillStyle = cat.color;
-    ctx.beginPath();
-    ctx.moveTo(centerX, centerY);
-    ctx.arc(centerX, centerY, radius, startAngle, startAngle + sliceAngle);
-    ctx.closePath();
-    ctx.fill();
-    startAngle += sliceAngle;
-  });
-
-  ctx.font = '11px sans-serif';
-  categories.forEach((cat, idx) => {
-    const pct = ((cat.count / totalSamples) * 100).toFixed(1);
-    const yPos = 210 + (idx * 20);
-    ctx.fillStyle = cat.color;
-    ctx.fillRect(25, yPos - 9, 12, 12);
-    ctx.fillStyle = textLabelColor;
-    ctx.fillText(`${cat.label}: ${cat.count} ticks (${pct}%)`, 45, yPos);
-  });
-}
-
-function handleCSVImport(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    const text = e.target.result;
-    const lines = text.split('\n');
-    let importedLogs = [];
-
-    for (let i = 1; i < lines.length; i++) {
-      const row = lines[i].split(',');
-      if (row.length >= 3 && row[0].trim() !== "") {
-        importedLogs.push({
-          timestamp: row[0].trim(),
-          minSNR: parseFloat(row[1]),
-          uncorrectables: parseInt(row[2], 10)
-        });
-      }
-    }
-
-    if (importedLogs.length > 0) {
-      chrome.storage.local.get({ networkLogs: [] }, (storage) => {
-        const existingMap = new Set(storage.networkLogs.map(l => l.timestamp));
-        const combined = [...storage.networkLogs];
-        importedLogs.forEach(item => {
-          if (!existingMap.has(item.timestamp)) combined.push(item);
-        });
-        chrome.storage.local.set({ networkLogs: combined }, () => {
-          alert(`Success: Integrated ${importedLogs.length} frames.`);
-          loadAndRenderData();
-        });
-      });
-    }
-  };
-  reader.readAsText(file);
-}
-
-function handleCSVExport() {
-  chrome.storage.local.get({ networkLogs: [] }, (storage) => {
-    const logs = storage.networkLogs;
-
-    if (!logs || logs.length === 0) {
-      alert("No data available to export yet.");
-      return;
-    }
-
-    // Sort chronologically before parsing output string payload
-    logs.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-    // Construct standard text schema header pipeline
-    let csvContent = "Timestamp,Worst SNR (dB),Uncorrectable Codewords\n";
-
-    logs.forEach(log => {
-      const timestamp = log.timestamp || '';
-      const minSNR = log.minSNR !== undefined ? log.minSNR : '';
-      const uncorrectables = log.uncorrectables !== undefined ? log.uncorrectables : '';
-
-      csvContent += `${timestamp},${minSNR},${uncorrectables}\n`;
-    });
-
-    // Generate blob tracking link context
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-
-    const downloadLink = document.createElement("a");
-    downloadLink.href = url;
-
-    const dateStamp = new Date().toISOString().split('T')[0];
-    downloadLink.setAttribute("download", `node_congestion_logs_${dateStamp}.csv`);
-
-    document.body.appendChild(downloadLink);
-    downloadLink.click();
-    document.body.removeChild(downloadLink);
-    URL.revokeObjectURL(url);
-  });
-}
-
-function renderEmptyState() {
-  const canvas = document.getElementById('optionsChart');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
-
-  canvas.width = 650; canvas.height = 280;
-  ctx.font = '14px sans-serif';
-  ctx.fillStyle = isDarkMode ? '#64748b' : '#94a3b8';
-  ctx.fillText('No history detected. Keep your modem diagnostics page active to compile timeline logs.', 50, 140);
-}

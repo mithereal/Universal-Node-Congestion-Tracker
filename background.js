@@ -1,77 +1,57 @@
+// background.js
+import { ModemRegistry } from './modems/registry.js';
+
+const MAX_LOG_SIZE = 2000;
+
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.local.get({ trackingEnabled: true }, (data) => {
-    updateToolbarIcon(data.trackingEnabled);
+  chrome.storage.local.get({ hardwareMetricsLog: [] }, (data) => {
+    console.log("Background service fully synchronized. Log Cache size:", data.hardwareMetricsLog.length);
   });
 });
-
-chrome.runtime.onStartup.addListener(() => {
-  chrome.storage.local.get({ trackingEnabled: true }, (data) => {
-    updateToolbarIcon(data.trackingEnabled);
-  });
-});
-
-// 2. Listen for real-time storage updates from the popup toggle switch
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === 'local' && changes.trackingEnabled) {
-    const isNowEnabled = changes.trackingEnabled.newValue;
-    updateToolbarIcon(isNowEnabled);
-  }
-});
-
-// 3. Icon Swap Core Engine
-function updateToolbarIcon(isEnabled) {
-  if (isEnabled) {
-    // Inject your vibrant blue/red active iconography
-    chrome.action.setIcon({
-      path: {
-        "16": "icon-16.png",
-        "32": "icon-32.png"
-      }
-    }, () => {
-      console.log("Universal Tracker: Extension bar icon updated to ACTIVE profile.");
-    });
-  } else {
-    // Inject your muted grey deactivated iconography
-    chrome.action.setIcon({
-      path: {
-        "16": "icon-16-off.png",
-        "32": "icon-32-off.png"
-      }
-    }, () => {
-      console.log("Universal Tracker: Extension bar icon updated to INACTIVE profile.");
-    });
-  }
-}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-
-  if (message.type === "SESSION_EXPIRED") {
-    chrome.notifications.create({
-      type: "basic",
-      iconUrl: "icon.png",
-      title: "Action Required: Modem Logged Out",
-      message: "Your modem session has expired. Please click your modem tab and log back in to resume tracking.",
-      priority: 2
-    });
-    return;
-  }
-
   if (message.type === "HARDWARE_METRICS") {
-    const hardwareData = message.data;
+      chrome.storage.local.get({ hardwareMetricsLog: [] }, (result) => {
+        let log = result.hardwareMetricsLog;
+        const newSample = message.data;
 
-    chrome.storage.local.get({ networkLogs: [] }, (data) => {
-      const logs = data.networkLogs;
+        // Calculate Delta
+        const lastSample = log[log.length - 1];
+        const previousTotal = lastSample ? lastSample.totalUncorrectables : 0;
 
-      logs.push({
-        timestamp: hardwareData.capturedAt,
-        minSNR: hardwareData.minSNR,
-        uncorrectables: hardwareData.totalUncorrectables
+        // Calculate delta, ensuring we don't report negative if modem rebooted
+        newSample.deltaUncorrectables = (newSample.totalUncorrectables >= previousTotal)
+            ? (newSample.totalUncorrectables - previousTotal)
+            : newSample.totalUncorrectables;
+
+        // Append and save
+        log.push(newSample);
+        chrome.storage.local.set({ hardwareMetricsLog: log });
       });
+    }
 
-      // Retain roughly a rolling week of 5-minute tracking ticks (~2016 entries)
-      if (logs.length > 2500) logs.shift();
+  if (message.type === "TRIGGER_DIAGNOSTIC_SCAN") {
+    chrome.storage.local.get({ modemProfile: 'auto' }, (settings) => {
+      let targetUrls = ["http://192.168.0.1/*", "http://192.168.100.1/*"];
 
-      chrome.storage.local.set({ networkLogs: logs });
+      // If profile is set to a specific hardware option instead of auto-detecting
+      if (settings.modemProfile !== 'auto') {
+        const selectedModem = ModemRegistry.find(m => m.id === settings.modemProfile);
+        if (selectedModem && selectedModem.defaultIP) {
+          targetUrls = [`http://${selectedModem.defaultIP}/*`];
+        }
+      }
+
+      chrome.tabs.query({ url: targetUrls }, (tabs) => {
+        if (tabs.length === 0) {
+          sendResponse({ status: "error", message: "No matched connection targets discovered." });
+          return;
+        }
+        chrome.tabs.reload(tabs[0].id, {}, () => {
+          sendResponse({ status: "initiated" });
+        });
+      });
     });
+    return true;
   }
 });

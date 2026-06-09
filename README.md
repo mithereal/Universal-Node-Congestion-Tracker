@@ -17,25 +17,8 @@ A lightweight, privacy-first Google Chrome Extension (Manifest V3) designed to a
 * **Theme Support**
 ---
 
-## 📂 Project Directory Structure
-
-```text
-universal-node-tracker/
-├── manifest.json         # Extension application manifests & permission definitions
-├── background.js        # Service worker managing state observers and toolbar icons
-├── content_router.js    # Decodes page signatures to inject matching modem drivers
-├── options.html         # Diagnostic dashboard UI markup
-├── options.js           # Analytics core (Canvas plotting, tooltips, CSV engine)
-├── popup.html           # Toolbar popup panel layout
-├── popup.js             # Handles quick-toggle execution bindings
-├── PRIVACY.md           # Zero-Data Collection privacy documentation
-├── icon-16.png          # Active state toolbar icon (16x16 standard screens)
-├── icon-32.png          # Active state toolbar icon (32x32 Retina screens)
-├── icon-16-off.png      # Muted disabled state toolbar icon (16x16)
-├── icon-32-off.png      # Muted disabled state toolbar icon (32x32)
-├── icon-128.png         # High-resolution Google Chrome Web Store asset profile
-└── modems/              # Modular hardware scrapers sandbox
-    ├── registry.js       # Central inventory mapping directory database
-    ├── arris_surfboard.js# Parsing logic for Arris S33, S34, and SB8200 matrix models
-    ├── isp_technicolor.js# Parsing logic for leased gateways (Comcast XB7/XB8 series)
-    └── Netgear_cm2000.js # Parsing logic for Netgear Nighthawk multi-gig series
+How to Use: 
+open the routers local page 
+log-in
+go to the connection -> cox network page
+or whatever similar page shows downstream

@@ -1,11 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Universal Node Congestion Tracker",
-  "version": "5.0",
+  "version": "6.0",
   "description": "Modular network performance history logger supporting multiple modem drivers, grid analysis, and donation modules.",
   "permissions": [
     "storage",
-    "tabs",
     "notifications"
   ],
   "host_permissions": [
@@ -14,7 +13,8 @@
     "http://192.168.100.1/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "content_scripts": [
     {
@@ -24,7 +24,7 @@
         "http://192.168.100.1/*"
       ],
       "js": ["content_router.js"],
-      "run_at": "document_end"
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
@@ -32,7 +32,9 @@
       "resources": [
         "modems/*.js",
         "icon-16-off.png",
-        "icon-32-off.png"
+        "icon-32-off.png",
+        "modems/registry.js",
+        "modems/drivers/*.js"
       ],
       "matches": ["<all_urls>"]
     }
