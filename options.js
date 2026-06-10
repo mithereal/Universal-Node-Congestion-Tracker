@@ -4,11 +4,14 @@ import { ModemRegistry } from './modems/registry.js';
 let hardwareTelemetryLog = [];
 let activeTabFilter = 'all';
 
+
 // Graphic Vector & Coordinate States
 let plottedCoordinatesCache = [];
 let hoverStateNode = null;
 let plottedPieSlicesCache = [];
 let hoveredPieSlice = null;
+
+const quickSampleBtn = document.getElementById('quickSampleBtn');
 
 const DEFAULT_SETTINGS = {
   extensionEnabled: true,
@@ -29,10 +32,11 @@ const UI = {
   chartTooltip: document.getElementById('chartTooltip'),
   pieTooltip: document.getElementById('pieTooltip'),
   csvFileInput: document.getElementById('csvFileInput'),
-  csvExportBtn: document.getElementById('csvExportBtn')
+  setBaselineBtn: document.getElementById('setBaselineBtn')
 };
 
 document.addEventListener('DOMContentLoaded', () => {
+  setupBaselineListener(); // Ensure this was called
   populateModemDropdown();
   loadStoredSettings();
   loadTelemetryData();
@@ -41,6 +45,38 @@ document.addEventListener('DOMContentLoaded', () => {
   listenForStorageChanges();
   setupThemeAutodetectListener();
 });
+
+// 1. Trigger the baseline capture
+function setupBaselineListener() {
+  if (UI.setBaselineBtn) {
+    UI.setBaselineBtn.addEventListener('click', establishBaseline);
+  }
+}
+
+
+function establishBaseline() {
+  if (hardwareTelemetryLog.length === 0) {
+    alert("No telemetry data to establish a baseline from.");
+    return;
+  }
+
+  // Get the most recent capture
+  const latestSnapshot = hardwareTelemetryLog[hardwareTelemetryLog.length - 1];
+
+  // Store in chrome.storage
+  chrome.storage.local.set({
+    baselineTelemetry: {
+      timestamp: Date.now(),
+      minSNR: latestSnapshot.minSNR,
+      avgSNR: latestSnapshot.avgSNR,
+      totalCorrectables: latestSnapshot.totalCorrectables,
+      totalUncorrectables: latestSnapshot.totalUncorrectables
+    }
+  }, () => {
+    alert("Baseline established at " + new Date().toLocaleTimeString());
+    renderDataVisualizations(); // Optional: trigger a redraw
+  });
+}
 
 function setupThemeAutodetectListener() {
   const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -95,7 +131,7 @@ function saveSetting(key, value) {
 
 function loadTelemetryData() {
   chrome.storage.local.get({ hardwareMetricsLog: [] }, (result) => {
-    hardwareTelemetryLog = result.hardwareMetricsLog;
+    hardwareTelemetryLog = result.hardwareMetricsLog || [];
     updateMetricsDashboard();
     renderDataVisualizations();
   });
@@ -106,8 +142,12 @@ function loadTelemetryData() {
  * If a filtered dataset is provided, it calculates metrics based on that view.
  * @param {Array|null} dataset - The filtered telemetry data (optional).
  */
+/**
+ * Updates the dashboard metrics, including SNR comparisons,
+ * cumulative errors, and baseline drift.
+ * @param {Array|null} dataset - The filtered telemetry data (optional).
+ */
 function updateMetricsDashboard(dataset = null) {
-  // Use the filtered dataset if provided, else fall back to full history
   const data = dataset || hardwareTelemetryLog;
   const sampleCount = data.length;
 
@@ -121,31 +161,36 @@ function updateMetricsDashboard(dataset = null) {
     return;
   }
 
-  // 1. Get the Current SNR (latest entry in the current view)
+  // 1. SNR Metrics
   const currentLog = data[data.length - 1];
   const currentSNR = currentLog.avgSNR ? currentLog.avgSNR.toFixed(1) : "--";
-
-  // 2. Calculate the Historical Lowest SNR within the current view
-  const allRecordedMinSNRs = data
-    .map(log => parseFloat(log.minSNR))
-    .filter(val => !isNaN(val) && val > 0);
-
+  const allRecordedMinSNRs = data.map(log => parseFloat(log.minSNR)).filter(val => !isNaN(val) && val > 0);
   const absoluteWorstSNR = allRecordedMinSNRs.length > 0 ? Math.min(...allRecordedMinSNRs) : null;
   const histText = absoluteWorstSNR ? absoluteWorstSNR.toFixed(1) : "--";
 
-  // 3. Update the SNR UI (Historical / Current format)
   const snrDisplay = document.getElementById('statSNRDisplay');
   if (snrDisplay) {
     snrDisplay.innerText = `${histText} / ${currentSNR} dB`;
-    // Visual alert if current SNR is in the "danger zone" (< 30dB)
     snrDisplay.style.color = (currentLog.avgSNR < 30) ? "#dc2626" : "var(--text-title)";
   }
 
-  // 4. Update Cumulative Errors based on the filtered view
-  const filteredErrorsSum = data.reduce((accum, log) => accum + (log.totalUncorrectables || 0), 0);
-  UI.statErrors.innerText = filteredErrorsSum.toLocaleString();
-}
+  // 2. Cumulative/Delta Error Metrics
+  // We use deltaUncorrectables for accuracy, falling back to total if delta missing
+  const filteredErrorsSum = data.reduce((accum, log) => accum + (log.deltaUncorrectables || log.totalUncorrectables || 0), 0);
 
+  // 3. Baseline Drift Calculation
+  chrome.storage.local.get(['baselineTelemetry'], (res) => {
+    const baseline = res.baselineTelemetry;
+    let errorDisplay = filteredErrorsSum.toLocaleString();
+
+    if (baseline) {
+      const errorsSinceBaseline = currentLog.totalUncorrectables - baseline.totalUncorrectables;
+      errorDisplay += ` <span style="font-size:0.8em; opacity:0.7;">(+${errorsSinceBaseline.toLocaleString()} since base)</span>`;
+    }
+
+    UI.statErrors.innerHTML = errorDisplay;
+  });
+}
 function setupEventListeners() {
   if (UI.pollingIntervalSelect) UI.pollingIntervalSelect.addEventListener('change', (e) => saveSetting('pollingInterval', parseInt(e.target.value, 10)));
   if (UI.modemProfileSelect) UI.modemProfileSelect.addEventListener('change', (e) => saveSetting('modemProfile', e.target.value));
@@ -493,3 +538,25 @@ function handlePieMouseMove(e) {
       }
     });
   }
+
+if (quickSampleBtn) {
+      quickSampleBtn.addEventListener('click', () => {
+        quickSampleBtn.innerText = "Scanning...";
+        quickSampleBtn.disabled = true;
+
+        chrome.runtime.sendMessage({ type: 'TRIGGER_DIAGNOSTIC_SCAN' }, (response) => {
+          if (chrome.runtime.lastError) { /* channel warm up */ }
+
+          setTimeout(() => {
+            quickSampleBtn.innerText = "🔄 Scan";
+            quickSampleBtn.disabled = false;
+
+            chrome.storage.local.get({ hardwareMetricsLog: [] }, (updatedData) => {
+              if (updatedData.hardwareMetricsLog && updatedData.hardwareMetricsLog.length > 0) {
+                updatePopupMetricsDisplay(updatedData.hardwareMetricsLog);
+              }
+            });
+          }, 1500);
+        });
+      });
+    }

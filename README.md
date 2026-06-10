@@ -3,6 +3,16 @@
 A lightweight, privacy-first Google Chrome Extension (Manifest V3) designed to automatically log, process, and chart cable modem diagnostic telemetry. By monitoring physical layer RF (Radio Frequency) stability over time, this tool helps users document local network node congestion, line noise degradation, and packet drops without sending data outside their local machine.
 
 ---
+### How to Use:
+* log-in to the routers admin page
+* click on connection -> cox network page or whatever similar page shows downstream
+* leave the page open in the background
+* ensure the extension is running by clicking the slider it will say extension running when active
+
+cable modem requests:
+if you would like your cable modem added open an issue, use the Cable Modem Request template.
+
+---
 
 ##  Key Features
 
@@ -17,8 +27,4 @@ A lightweight, privacy-first Google Chrome Extension (Manifest V3) designed to a
 * **Theme Support**
 ---
 
-How to Use: 
-open the routers local page 
-log-in
-go to the connection -> cox network page
-or whatever similar page shows downstream
+Donations are Appreciated.
