@@ -428,8 +428,8 @@ function setupEventListeners() {
     UI.pieChart.addEventListener('mouseleave', () => UI.pieTooltip.style.display = 'none');
   }
 
-  if (UI.csvExportBtn) UI.csvExportBtn.addEventListener('click', exportTelemetryToCSV);
-  if (UI.csvFileInput) UI.csvFileInput.addEventListener('change', importTelemetryFromCSV);
+  if (UI.csvExportBtn) UI.csvExportBtn.addEventListener('click', exportFullStorage);
+  if (UI.csvFileInput) UI.csvFileInput.addEventListener('change', importFullStorage);
 }
 
 function populateModemDropdown() {
@@ -473,40 +473,7 @@ function getActiveThemePalette() {
   };
 }
 
-function exportTelemetryToCSV() {
-  if (hardwareTelemetryLog.length === 0) return;
-  const headers = ["Timestamp", "ChannelsScanned", "AvgSNR", "TotalUncorrectables"];
-  const rows = hardwareTelemetryLog.map(log => [log.capturedAt, log.channelsScanned || 0, log.avgSNR || 0, log.totalUncorrectables || 0]);
-  const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
-  const downloadAnchor = document.createElement("a");
-  downloadAnchor.setAttribute("href", encodeURI(csvContent));
-  downloadAnchor.setAttribute("download", `node_metrics_${Date.now()}.csv`);
-  document.body.appendChild(downloadAnchor);
-  downloadAnchor.click();
-  document.body.removeChild(downloadAnchor);
-}
 
-function importTelemetryFromCSV(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const fileReader = new FileReader();
-  fileReader.onload = function(e) {
-    const lines = e.target.result.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-    const importedArrayLog = [];
-    for (let i = 1; i < lines.length; i++) {
-      const parts = lines[i].split(",");
-      if (parts.length >= 4) {
-        importedArrayLog.push({ capturedAt: parseInt(parts[0], 10), channelsScanned: parseInt(parts[1], 10) || 0, avgSNR: parseFloat(parts[2]) || 0, totalUncorrectables: parseInt(parts[3], 10) || 0 });
-      }
-    }
-    if (importedArrayLog.length > 0 && confirm(`Import ${importedArrayLog.length} logs?`)) {
-      chrome.storage.local.set({ hardwareMetricsLog: importedArrayLog }, loadTelemetryData);
-    }
-  };
-  fileReader.readAsText(file);
-}
-
-// 6. Donation Window Logic
 const donateModal = document.getElementById('donateModal');
 const openDonateBtn = document.getElementById('openDonateModalBtn');
 const closeDonateBtn = document.getElementById('closeDonateModalBtn');
@@ -571,6 +538,71 @@ if (quickSampleBtn) {
         });
       }
     }
-
-
   });
+
+  /**
+   * Exports the entire contents of chrome.storage.local to a JSON file.
+   * This ensures that logs, baseline telemetry, and extension settings
+   * are all backed up together.
+   */
+  async function exportFullStorage() {
+    // 1. Fetch all data currently held in local storage
+    chrome.storage.local.get(null, (allData) => {
+      // 2. Serialize data to a formatted JSON string
+      const dataStr = JSON.stringify(allData, null, 2);
+
+      // 3. Create a blob for the file content
+      const blob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+
+      // 4. Create an anchor element to simulate a user click
+      const a = document.createElement('a');
+      const timestamp = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = `node_tracker_backup_${timestamp}.json`;
+
+      // 5. Append, trigger, and cleanup
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      // Clean up the object URL to save memory
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  /**
+   * Imports a JSON file and overwrites the extension's local storage.
+   * @param {File} file - The file object selected from the input.
+   */
+  function importFullStorage(file) {
+    if (!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = (e) => {
+      try {
+        // 1. Parse the JSON content
+        const importedData = JSON.parse(e.target.result);
+
+        // 2. Clear current storage and set the new data
+        // Alternatively, use chrome.storage.local.set(importedData)
+        // to merge instead of overwriting
+        chrome.storage.local.set(importedData, () => {
+          if (chrome.runtime.lastError) {
+            alert("Error importing data: " + chrome.runtime.lastError.message);
+          } else {
+            alert("Storage successfully restored!");
+            // 3. Reload the page to refresh charts with the new data
+            window.location.reload();
+          }
+        });
+      } catch (err) {
+        console.error("Failed to parse backup file:", err);
+        alert("Invalid file format. Please ensure you are uploading a valid JSON backup.");
+      }
+    };
+
+    // Start reading the file
+    reader.readAsText(file);
+  }
