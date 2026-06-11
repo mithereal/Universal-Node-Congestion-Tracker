@@ -1,10 +1,8 @@
-// modems/cox_technicolor.js
 const CoxTechnicolorDriver = {
-  POLL_INTERVAL: 5 * 60 * 1000,
+  DEFAULT_POLL: 5 * 60 * 1000,
 
   init() {
     const checkInterval = setInterval(() => {
-      // Look for the specific data table structure in your source
       if (document.querySelector("table.data") || document.readyState === 'complete') {
         clearInterval(checkInterval);
         this.startEngine();
@@ -13,80 +11,70 @@ const CoxTechnicolorDriver = {
   },
 
   startEngine() {
-    chrome.storage.local.get({ extensionEnabled: true }, (storage) => {
+    chrome.storage.local.get({ extensionEnabled: true, pollingInterval: 5 }, (storage) => {
       if (!storage.extensionEnabled) return;
 
       console.log("Technicolor Driver: Scanning signal matrix...");
 
       if (document.querySelector("table.data")) {
-        const metrics = this.parseTables();
-        if (metrics) {
-          chrome.runtime.sendMessage({ type: "HARDWARE_METRICS", data: metrics }).catch(() => {});
+        const channelMetrics = this.parseChannels();
+
+        if (channelMetrics && channelMetrics.channels.length > 0) {
+          // 1. Send Granular Channel Data
+          chrome.runtime.sendMessage({ type: "CHANNEL_DATA", data: channelMetrics }).catch(() => {});
+
+          // 2. Calculate and send Summary Metrics under correct message mapping identifier
+          const totalErrors = channelMetrics.channels.reduce((sum, ch) => sum + ch.uncorrectable, 0);
+          const totalSNR = channelMetrics.channels.reduce((sum, ch) => sum + ch.snr, 0);
+          const avgSNR = totalSNR / channelMetrics.channels.length;
+
+          const summaryMetrics = {
+            capturedAt: channelMetrics.capturedAt,
+            avgSNR: parseFloat(avgSNR.toFixed(2)),
+            minSNR: Math.min(...channelMetrics.channels.map(ch => ch.snr)),
+            totalUncorrectables: totalErrors,
+            channelsScanned: channelMetrics.channels.length
+          };
+
+          chrome.runtime.sendMessage({ type: "HARDWARE_METRICS", data: summaryMetrics }).catch(() => {});
         }
       }
-      setTimeout(() => window.location.reload(), this.POLL_INTERVAL);
+
+      const intervalMs = (storage.pollingInterval * 60 * 1000) || this.DEFAULT_POLL;
+      setTimeout(() => window.location.reload(), intervalMs);
     });
   },
 
-  parseTables() {
+  parseChannels() {
     const rows = document.querySelectorAll("table.data tr");
+    const channels = [];
 
-    // Initialize objects
-    let snrValues = [];
-    let totalUnerrored = 0;
-    let totalCorrectables = 0;
-    let totalUncorrectables = 0;
+    const findRow = (label) => Array.from(rows).find(r =>
+      r.querySelector("th.row-label")?.innerText.toLowerCase().includes(label)
+    );
 
-    rows.forEach(row => {
-      const th = row.querySelector("th.row-label");
-      if (!th) return;
+    const getCells = (row) => row ? Array.from(row.querySelectorAll("td div.netWidth")) : [];
 
-      const label = th.innerText.toLowerCase().trim();
-      const cells = Array.from(row.querySelectorAll("td div.netWidth"));
+    const snrRow = findRow("snr");
+    const unerroredRow = findRow("unerrored codewords");
+    const correctableRow = findRow("correctable codewords");
+    const uncorrectableRow = findRow("uncorrectable codewords");
 
-      // 1. SNR Parsing
-      if (label === "snr") {
-        cells.forEach(cell => {
-          const num = parseFloat(cell.innerText.replace(/[^\d.]/g, ''));
-          if (!isNaN(num) && num > 10 && num < 60) snrValues.push(num);
-        });
-      }
+    const snrCells = getCells(snrRow);
 
-      // 2. Unerrored Codewords
-      if (label === "unerrored codewords") {
-        cells.forEach(cell => {
-          const val = parseInt(cell.innerText.replace(/,/g, ''), 10);
-          if (!isNaN(val)) totalUnerrored += val;
-        });
-      }
-
-      // 3. Correctable Codewords
-      if (label === "correctable codewords") {
-        cells.forEach(cell => {
-          const val = parseInt(cell.innerText.replace(/,/g, ''), 10);
-          if (!isNaN(val)) totalCorrectables += val;
-        });
-      }
-
-      // 4. Uncorrectable Codewords
-      if (label === "uncorrectable codewords") {
-        cells.forEach(cell => {
-          const val = parseInt(cell.innerText.replace(/,/g, ''), 10);
-          if (!isNaN(val)) totalUncorrectables += val;
-        });
-      }
+    snrCells.forEach((_, i) => {
+      channels.push({
+        channelId: i + 1,
+        snr: parseFloat(getCells(snrRow)[i]?.innerText.replace(/[^\d.]/g, '')) || 0,
+        unerrored: parseInt(getCells(unerroredRow)[i]?.innerText.replace(/,/g, ''), 10) || 0,
+        correctable: parseInt(getCells(correctableRow)[i]?.innerText.replace(/,/g, ''), 10) || 0,
+        uncorrectable: parseInt(getCells(uncorrectableRow)[i]?.innerText.replace(/,/g, ''), 10) || 0
+      });
     });
-
-    if (snrValues.length === 0) return null;
 
     return {
       capturedAt: Date.now(),
-      channelsScanned: snrValues.length,
-      minSNR: Math.min(...snrValues),
-      avgSNR: parseFloat((snrValues.reduce((a, b) => a + b, 0) / snrValues.length).toFixed(2)),
-      totalUnerrored: totalUnerrored,
-      totalCorrectables: totalCorrectables,
-      totalUncorrectables: totalUncorrectables
+      channels: channels
     };
   }
 };

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Universal Node Congestion Tracker",
-  "version": "6.0",
+  "version": "7.0",
   "description": "Modular network performance history logger supporting multiple modem drivers, grid analysis, and donation modules.",
   "permissions": [
     "storage",

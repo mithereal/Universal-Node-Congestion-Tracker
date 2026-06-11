@@ -11,6 +11,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const openOptionsBtn = document.getElementById('openOptionsBtn');
   const quickSampleBtn = document.getElementById('quickSampleBtn');
 
+  const iconPaths = {
+    on: {
+      "16": "icon-16.png",
+      "32": "icon-32.png"
+    },
+    off: {
+      "16": "icon-16-off.png",
+      "32": "icon-32-off.png"
+    }
+  };
+
   chrome.storage.local.get({
     extensionEnabled: true,
     hardwareMetricsLog: []
@@ -27,6 +38,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const isEnabled = e.target.checked;
       chrome.storage.local.set({ extensionEnabled: isEnabled }, () => {
         updateToggleUI(isEnabled);
+        chrome.action.setIcon({ path: isEnabled ? iconPaths.on : iconPaths.off });
         chrome.runtime.sendMessage({ type: 'TOGGLE_CHANGED', enabled: isEnabled }).catch(() => {});
       });
     });
@@ -41,14 +53,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (quickSampleBtn) {
     quickSampleBtn.addEventListener('click', () => {
-      quickSampleBtn.innerText = "Scanning...";
+      quickSampleBtn.innerText = "Scanning";
       quickSampleBtn.disabled = true;
 
       chrome.runtime.sendMessage({ type: 'TRIGGER_DIAGNOSTIC_SCAN' }, (response) => {
         if (chrome.runtime.lastError) { /* channel warm up */ }
 
         setTimeout(() => {
-          quickSampleBtn.innerText = "🔄 Force Diagnosis Scan";
+          quickSampleBtn.innerText = "🔄 Scan";
           quickSampleBtn.disabled = false;
 
           chrome.storage.local.get({ hardwareMetricsLog: [] }, (updatedData) => {
@@ -61,17 +73,34 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  function updatePopupMetricsDisplay(logArray) {
-    const latestLog = logArray[logArray.length - 1];
-    if (!latestLog) return;
+function updatePopupMetricsDisplay(logArray) {
+  if (!logArray || logArray.length === 0) return;
 
-    if (popupMinSNR && latestLog.minSNR !== undefined) {
-      popupMinSNR.innerText = `${Number(latestLog.minSNR).toFixed(1)} dB`;
-    }
-    if (popupErrors && latestLog.totalUncorrectables !== undefined) {
-      popupErrors.innerText = Number(latestLog.totalUncorrectables).toLocaleString();
-    }
+  const latestLog = logArray[logArray.length - 1];
+  const previousLog = logArray.length > 1 ? logArray[logArray.length - 2] : null;
+
+  // 1. Current SNR
+  const currentSNR = latestLog.avgSNR ?? latestLog.minSNR;
+  if (popupMinSNR && currentSNR !== undefined) {
+    popupMinSNR.innerText = `${Number(currentSNR).toFixed(1)} dB`;
+    popupMinSNR.style.color = currentSNR < 30 ? "#ef4444" : "#10b981";
   }
+
+  // 2. Total Errors and Delta
+  if (popupErrors) {
+    const total = latestLog.totalUncorrectables || 0;
+
+    // Calculate Delta: Current total minus previous total
+    // (If this is the first sample, delta is 0)
+    const delta = previousLog ? (total - (previousLog.totalUncorrectables || 0)) : 0;
+
+    // Display total with delta in parentheses
+    popupErrors.innerHTML = `${total.toLocaleString()}
+      <span style="font-size: 0.8em; color: ${delta > 0 ? '#ef4444' : '#64748b'};">
+        (+${delta})
+      </span>`;
+  }
+}
 
   function updateToggleUI(enabled) {
     if (enabled) {
